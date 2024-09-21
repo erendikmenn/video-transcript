@@ -1,69 +1,30 @@
 import os
 import whisper
 from moviepy.editor import VideoFileClip
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import sent_tokenize, word_tokenize
-from nltk.probability import FreqDist
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
-import re
-
-# NLTK'nin gerekli verilerini indirin (İngilizce için)
-nltk.download('punkt')
-nltk.download('stopwords')
-
-# Videonun bulunduğu dizini ve dosya adını belirtin
-video_directory = '.'  # Şu anki çalışma dizini
-video_filename = 'test.mp4'
-video_path = os.path.join(video_directory, video_filename)
-
-# Ses dosyasının geçici olarak kaydedileceği yol
-audio_path = os.path.join(video_directory, 'extracted_audio.wav')
-
-# Transkript ve özet dosyalarının kaydedileceği yollar
-transcript_path = os.path.join(video_directory, 'transcript.txt')
-summary_path = os.path.join(video_directory, 'summary.txt')
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import threading
+import sv_ttk
 
 # Whisper modelini yükleyin
 model = whisper.load_model("base")
 
-# Videodan ses ayrıştırılıyor
-print("Videodan ses ayrıştırılıyor...")
-video = VideoFileClip(video_path)
-video.audio.write_audiofile(audio_path)
-
-# Whisper ile ses dosyasını transkript etme (İngilizce dilinde transkript)
-print("Transkript oluşturuluyor...")
-result = model.transcribe(audio_path, language="en")
-segments = result['segments']
-
 def format_timestamp(seconds):
     return f"{int(seconds // 3600):02d}:{int((seconds % 3600) // 60):02d}:{int(seconds % 60):02d}"
 
-# Transkript dosyasını kaydetme
-with open(transcript_path, 'w', encoding='utf-8') as f:
-    for segment in segments:
-        f.write(f"[{format_timestamp(segment['start'])}] {segment['text']}\n")
-print(f"Transkript başarıyla oluşturuldu: {transcript_path}")
-
-
 def summarize_text_with_timestamps(segments, num_sentences=5):
-    # Cümleleri ve zaman damgalarını ayır
     sentences = [segment['text'] for segment in segments]
     timestamps = [segment['start'] for segment in segments]
     
-    # TF-IDF vektörleştiriciyi oluştur ve uygula
     vectorizer = TfidfVectorizer(stop_words='english')
     tfidf_matrix = vectorizer.fit_transform(sentences)
     
-    # Her cümlenin önem skorunu hesapla
     sentence_scores = np.sum(tfidf_matrix.toarray(), axis=1)
     
-    # En yüksek skorlu cümleleri seç
     top_sentence_indices = sentence_scores.argsort()[-num_sentences:][::-1]
     
-    # Özeti oluştur ve zaman damgalarını ekle
     summary = []
     for i in sorted(top_sentence_indices):
         timestamp = format_timestamp(timestamps[i])
@@ -71,14 +32,112 @@ def summarize_text_with_timestamps(segments, num_sentences=5):
     
     return "\n".join(summary)
 
-# Metni özetle ve summary.txt dosyasına kaydet
-print("Metin özetleniyor...")
-summary = summarize_text_with_timestamps(segments)
-with open(summary_path, 'w', encoding='utf-8') as f:
-    f.write(summary)
-print(f"Özet başarıyla oluşturuldu: {summary_path}")
+def update_status(message):
+    status_var.set(message)
+    root.update_idletasks()
 
-# Geçici ses dosyasını silme
-os.remove(audio_path)
+def update_progress(value):
+    progress_var.set(value)
+    root.update_idletasks()
 
-print("İşlem tamamlandı.")
+def process_video():
+    video_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.avi *.mov")])
+    if not video_path:
+        return
+
+    video_directory = os.path.dirname(video_path)
+    video_filename = os.path.basename(video_path)
+    
+    audio_path = os.path.join(video_directory, 'extracted_audio.wav')
+    transcript_path = os.path.join(video_directory, f'{os.path.splitext(video_filename)[0]}_transcript.txt')
+    summary_path = os.path.join(video_directory, f'{os.path.splitext(video_filename)[0]}_summary.txt')
+
+    def process():
+        try:
+            update_status("Videodan ses ayrıştırılıyor...")
+            update_progress(20)
+            video = VideoFileClip(video_path)
+            video.audio.write_audiofile(audio_path, verbose=False, logger=None)
+
+            update_status("Transkript oluşturuluyor...")
+            update_progress(40)
+            result = model.transcribe(audio_path, language="en")
+            segments = result['segments']
+
+            update_status("Transkript kaydediliyor...")
+            update_progress(60)
+            with open(transcript_path, 'w', encoding='utf-8') as f:
+                for segment in segments:
+                    f.write(f"[{format_timestamp(segment['start'])}] {segment['text']}\n")
+
+            update_status("Metin özetleniyor...")
+            update_progress(80)
+            summary = summarize_text_with_timestamps(segments)
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                f.write(summary)
+
+            os.remove(audio_path)
+
+            update_status("İşlem tamamlandı!")
+            update_progress(100)
+            messagebox.showinfo("İşlem Tamamlandı", f"Transkript ve özet başarıyla oluşturuldu.\nTranskript: {transcript_path}\nÖzet: {summary_path}")
+        except Exception as e:
+            messagebox.showerror("Hata", f"İşlem sırasında bir hata oluştu: {str(e)}")
+        finally:
+            select_button.config(state=tk.NORMAL)
+
+    select_button.config(state=tk.DISABLED)
+    threading.Thread(target=process).start()
+
+# Ana pencereyi oluştur
+root = tk.Tk()
+root.title("Video Özet Asistanı")
+root.geometry("800x600")
+sv_ttk.set_theme("dark")
+
+# Ana çerçeve
+main_frame = ttk.Frame(root, padding="40 40 40 40")
+main_frame.pack(fill=tk.BOTH, expand=True)
+
+# Başlık
+title_label = ttk.Label(main_frame, text="Video Özet Asistanı", font=("Helvetica", 28, "bold"))
+title_label.pack(pady=(0, 30))
+
+# İşlem çerçevesi
+process_frame = ttk.Frame(main_frame)
+process_frame.pack(fill=tk.X, pady=20)
+
+# Dosya seçme düğmesi
+select_button = ttk.Button(process_frame, text="Video Dosyası Seç", command=process_video, style="Accent.TButton", width=25)
+select_button.pack(side=tk.LEFT, padx=(0, 20))
+
+# Durum mesajı
+status_var = tk.StringVar()
+status_label = ttk.Label(process_frame, textvariable=status_var, font=("Helvetica", 12))
+status_label.pack(side=tk.LEFT)
+
+# İlerleme çubuğu
+progress_var = tk.DoubleVar()
+progress_bar = ttk.Progressbar(main_frame, variable=progress_var, maximum=100, length=700)
+progress_bar.pack(pady=30)
+
+# Bilgi çerçevesi
+info_frame = ttk.Frame(main_frame)
+info_frame.pack(fill=tk.X, pady=20)
+
+# Bilgi etiketi
+info_label = ttk.Label(info_frame, text="Video dosyanızı seçin ve özet oluşturma işlemi başlasın.", 
+                       font=("Helvetica", 12), wraplength=700, justify="center")
+info_label.pack()
+
+# Ayırıcı çizgi
+separator = ttk.Separator(main_frame, orient="horizontal")
+separator.pack(fill=tk.X, pady=30)
+
+# Telif hakkı bilgisi
+copyright_label = ttk.Label(main_frame, text="© 2023 Video Özet Asistanı. Tüm hakları saklıdır.", 
+                            font=("Helvetica", 9))
+copyright_label.pack(side=tk.BOTTOM, pady=(20, 0))
+
+# Uygulamayı başlat
+root.mainloop()
