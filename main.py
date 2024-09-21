@@ -1,84 +1,77 @@
 import os
 import whisper
-from moviepy.editor import VideoFileClip
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import sent_tokenize, word_tokenize
-from nltk.probability import FreqDist
-from sklearn.feature_extraction.text import TfidfVectorizer
+import yt_dlp
+import ffmpeg
 import numpy as np
-import re
-
-# NLTK'nin gerekli verilerini indirin (İngilizce için)
-nltk.download('punkt')
-nltk.download('stopwords')
-
-# Videonun bulunduğu dizini ve dosya adını belirtin
-video_directory = '.'  # Şu anki çalışma dizini
-video_filename = 'test.mp4'
-video_path = os.path.join(video_directory, video_filename)
-
-# Ses dosyasının geçici olarak kaydedileceği yol
-audio_path = os.path.join(video_directory, 'extracted_audio.wav')
-
-# Transkript ve özet dosyalarının kaydedileceği yollar
-transcript_path = os.path.join(video_directory, 'transcript.txt')
-summary_path = os.path.join(video_directory, 'summary.txt')
+from tqdm import tqdm
+import time
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Whisper modelini yükleyin
-model = whisper.load_model("base")
-
-# Videodan ses ayrıştırılıyor
-print("Videodan ses ayrıştırılıyor...")
-video = VideoFileClip(video_path)
-video.audio.write_audiofile(audio_path)
-
-# Whisper ile ses dosyasını transkript etme (İngilizce dilinde transkript)
-print("Transkript oluşturuluyor...")
-result = model.transcribe(audio_path, language="en")
-segments = result['segments']
+model = whisper.load_model("tiny")  # veya "small"
 
 def format_timestamp(seconds):
     return f"{int(seconds // 3600):02d}:{int((seconds % 3600) // 60):02d}:{int(seconds % 60):02d}"
 
-# Transkript dosyasını kaydetme
-with open(transcript_path, 'w', encoding='utf-8') as f:
-    for segment in segments:
-        f.write(f"[{format_timestamp(segment['start'])}] {segment['text']}\n")
-print(f"Transkript başarıyla oluşturuldu: {transcript_path}")
-
-
-def summarize_text_with_timestamps(segments, num_sentences=5):
-    # Cümleleri ve zaman damgalarını ayır
-    sentences = [segment['text'] for segment in segments]
-    timestamps = [segment['start'] for segment in segments]
+def get_audio_from_url(url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192',
+        }],
+        'outtmpl': '-',
+        'quiet': True,
+        'logtostderr': True,
+    }
     
-    # TF-IDF vektörleştiriciyi oluştur ve uygula
-    vectorizer = TfidfVectorizer(stop_words='english')
-    tfidf_matrix = vectorizer.fit_transform(sentences)
-    
-    # Her cümlenin önem skorunu hesapla
-    sentence_scores = np.sum(tfidf_matrix.toarray(), axis=1)
-    
-    # En yüksek skorlu cümleleri seç
-    top_sentence_indices = sentence_scores.argsort()[-num_sentences:][::-1]
-    
-    # Özeti oluştur ve zaman damgalarını ekle
-    summary = []
-    for i in sorted(top_sentence_indices):
-        timestamp = format_timestamp(timestamps[i])
-        summary.append(f"[{timestamp}] {sentences[i]}")
-    
-    return "\n".join(summary)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        url = info['url']
+        duration = info.get('duration')
+        
+    out, _ = (
+        ffmpeg
+        .input(url)
+        .output('-', format='s16le', acodec='pcm_s16le', ac=1, ar='16k')
+        .overwrite_output()
+        .run(capture_stdout=True, capture_stderr=True)
+    )
+    return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0, duration
 
-# Metni özetle ve summary.txt dosyasına kaydet
-print("Metin özetleniyor...")
-summary = summarize_text_with_timestamps(segments)
-with open(summary_path, 'w', encoding='utf-8') as f:
-    f.write(summary)
-print(f"Özet başarıyla oluşturuldu: {summary_path}")
+def process_video(url):
+    transcript_path = 'transcript.txt'
 
-# Geçici ses dosyasını silme
-os.remove(audio_path)
+    try:
+        print("Videodan ses alınıyor...")
+        audio, duration = get_audio_from_url(url)
 
-print("İşlem tamamlandı.")
+        print("Transkript oluşturuluyor...")
+        start_time = time.time()
+        
+        # Transkripsiyon işlemi için ilerleme çubuğu
+        with tqdm(total=100, desc="İşlem İlerlemesi", bar_format="{l_bar}{bar} [ Tahmini kalan süre: {remaining} ]") as pbar:
+            result = model.transcribe(audio, language="en", verbose=False)
+            pbar.update(100)  # İşlem tamamlandığında çubuğu %100'e getir
+
+        end_time = time.time()
+        process_duration = end_time - start_time
+
+        # Transkript dosyasını kaydetme
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            for segment in result['segments']:
+                f.write(f"[{format_timestamp(segment['start'])}] {segment['text']}\n")
+
+        print(f"\nTranskript başarıyla oluşturuldu: {transcript_path}")
+        print(f"İşlem süresi: {format_timestamp(process_duration)}")
+
+    except Exception as e:
+        print(f"Bir hata oluştu: {str(e)}")
+
+    print("İşlem tamamlandı.")
+
+# Kullanım örneği
+video_url = input("Lütfen video URL'sini girin: ")
+process_video(video_url)
